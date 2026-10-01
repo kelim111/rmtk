@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>rmtk · RPG Maker 工程解析</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #0f1115; color: #e6e8ee; }
+  header { padding: 28px 32px 8px; }
+  h1 { margin: 0 0 6px; font-size: 24px; }
+  .sub { color: #98a2b3; }
+  main { padding: 16px 32px 64px; max-width: 1180px; }
+  .drop { border: 2px dashed #39415a; border-radius: 14px; padding: 44px 20px; text-align: center; background: #171a22; transition: .15s; }
+  .drop.hot { border-color: #5b8cff; background: #1b2333; }
+  .drop b { color: #7aa2ff; }
+  button { background: #2b6cff; color: #fff; border: 0; border-radius: 8px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
+  button.ghost { background: #222634; color: #cbd5e1; }
+  button:disabled { opacity: .5; cursor: progress; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 18px 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { background: #171a22; border: 1px solid #232838; border-radius: 12px; padding: 12px 14px; }
+  .card .n { font-size: 22px; font-weight: 700; }
+  .card .k { color: #98a2b3; font-size: 13px; }
+  pre { background: #12141b; border: 1px solid #232838; border-radius: 10px; padding: 14px; overflow: auto; max-height: 420px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border-bottom: 1px solid #232838; padding: 6px 8px; text-align: left; vertical-align: top; }
+  .err { color: #ff8080; } .warn { color: #ffd166; } .info { color: #79c0ff; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: #223; }
+  .muted { color: #98a2b3; }
+  a { color: #7aa2ff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>rmtk · RPG Maker 工程 AI 辅助解析工具</h1>
+  <div class="sub">支持 2000 / 2003 / XP / VX / VX Ace / MV / MZ —— 拖一个工程文件夹（或 zip）进来，就地出 Bug 报告和项目文档。</div>
+</header>
+<main>
+  <div class="drop" id="drop">
+    <div style="font-size:34px">📂</div>
+    <p>把 <b>工程文件夹</b> 拖到这里（或者 <b>zip 包</b>），也可以
+      <label style="color:#7aa2ff;cursor:pointer;text-decoration:underline">
+        <input id="pickDir" type="file" webkitdirectory multiple style="display:none" />选择文件夹
+      </label>
+      /
+      <label style="color:#7aa2ff;cursor:pointer;text-decoration:underline">
+        <input id="pickZip" type="file" accept=".zip" style="display:none" />选择 zip
+      </label>
+    </p>
+    <div class="muted" id="hint">文件只在本机解析，不会上传到第三方服务器。</div>
+  </div>
+
+  <div class="row">
+    <button id="btnReport" disabled>解析并出报告</button>
+    <button class="ghost" id="btnDownload" disabled>下载 Markdown 报告</button>
+    <button class="ghost" id="btnPack" disabled>导出语言包 zip</button>
+    <span class="muted" id="status"></span>
+  </div>
+  <div id="out"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let payload = null, currentFiles = null;
+const drop = $('drop');
+const setBusy = (b) => {
+  $('btnReport').disabled = b || !currentFiles;
+  $('btnPack').disabled = b || !currentFiles;
+  $('btnDownload').disabled = b || !payload;
+};
+
+function pick(files) {
+  if (!files || !files.length) return;
+  currentFiles = [...files];
+  $('hint').textContent = '已选择：' + (currentFiles.length === 1 ? currentFiles[0].name : currentFiles.length + ' 个文件');
+  setBusy(false);
+}
+['dragenter', 'dragover'].forEach((e) => drop.addEventListener(e, (ev) => { ev.preventDefault(); drop.classList.add('hot'); }));
+['dragleave', 'drop'].forEach((e) => drop.addEventListener(e, () => drop.classList.remove('hot')));
+drop.addEventListener('drop', async (ev) => {
+  ev.preventDefault();
+  const items = ev.dataTransfer.items;
+  if (!items || !items.length) return pick(ev.dataTransfer.files);
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const f = await new Promise((r) => entry.file(r));
+      out.push(new File([f], prefix + f.name));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const kids = await new Promise((r) => reader.readEntries(r));
+      for (const k of kids) await walk(k, prefix + entry.name + '/');
+    }
+  };
+  const roots = [...items].map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (!roots.length) return pick(ev.dataTransfer.files);
+  for (const r of roots) await walk(r, '');
+  pick(out);
+});
+$('pickDir').addEventListener('change', (e) => pick(e.target.files));
+$('pickZip').addEventListener('change', (e) => pick(e.target.files));
+
+async function post(url) {
+  const fd = new FormData();
+  for (const f of currentFiles) fd.append('file', f, f.webkitRelativePath || f.name);
+  const res = await fetch(url, { method: 'POST', body: fd });
+  if (!res.ok) throw new Error(await res.text());
+  return res;
+}
+
+$('btnReport').addEventListener('click', async () => {
+  $('status').textContent = '解析中…'; setBusy(true);
+  try {
+    const res = await post('/api/analyze');
+    payload = await res.json();
+    render(payload);
+    $('status').textContent = '完成';
+  } catch (e) { $('status').textContent = '出错：' + e.message; }
+  setBusy(false);
+});
+
+$('btnDownload').addEventListener('click', () => {
+  if (!payload) return;
+  const blob = new Blob([payload.markdown], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'rmtk-report.md';
+  a.click();
+});
+
+$('btnPack').addEventListener('click', async () => {
+  $('status').textContent = '打包语言包…'; setBusy(true);
+  try {
+    const res = await post('/api/translate');
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'rmtk-language-pack.zip';
+    a.click();
+    $('status').textContent = '语言包已下载';
+  } catch (e) { $('status').textContent = '出错：' + e.message; }
+  setBusy(false);
+});
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m])); }
+
+function render(p) {
+  const s = p.stats, b = p.bugs.summary;
+  const card = (n, k) => '<div class="card"><div class="n">' + n + '</div><div class="k">' + k + '</div></div>';
+  let html = '<div class="row"><span class="pill">' + esc(p.label || p.engine) + '</span>' +
+    (p.title ? '<span class="pill">' + esc(p.title) + '</span>' : '') + '</div>';
+  html += '<div class="cards">' + card(s.maps, '地图') + card(s.events, '事件') + card(s.dialogues, '对话') +
+    card(b.error, '错误') + card(b.warning, '警告') + card(b.info, '提示') + card(p.dialogueTotal, '文本总数') + '</div>';
+  if (p.bugs.issues.length) {
+    html += '<h3>隐性 Bug</h3><table><tr><th>级别</th><th>位置</th><th>问题</th></tr>';
+    for (const i of p.bugs.issues.slice(0, 150)) {
+      const cls = i.level === 'error' ? 'err' : i.level === 'warning' ? 'warn' : 'info';
+      const w = i.where || {};
+      const pos = [w.mapName ? '地图「' + w.mapName + '」' : '', w.eventName ? '事件「' + w.eventName + '」' : ''].filter(Boolean).join(' / ') || '全局';
+      html += '<tr><td class="' + cls + '">' + i.level + '</td><td>' + esc(pos) + '</td><td><b>' + esc(i.title) +
+        '</b><br><span class="muted">' + esc(i.detail) + '</span></td></tr>';
+    }
+    html += '</table>';
+  }
+  html += '<h3>地图跳转图（mermaid）</h3><pre>' + esc(p.mermaid.map) + '</pre>';
+  if (p.quest.nodes.length) html += '<h3>任务树（mermaid）</h3><pre>' + esc(p.mermaid.quest) + '</pre>';
+  html += '<h3>对话（前 200 条 / 共 ' + p.dialogueTotal + '）</h3><table><tr><th>地图</th><th>事件</th><th>文本</th></tr>';
+  for (const d of p.dialogues.slice(0, 200)) {
+    html += '<tr><td>' + esc(d.mapName) + '</td><td>' + esc(d.eventName) + '</td><td>' + esc(d.text) + '</td></tr>';
+  }
+  html += '</table>';
+  $('out').innerHTML = html;
+}
+</script>
+</body>
+</html>
